@@ -1,91 +1,11 @@
 const utils = @import("utils.zig");
-const parse = @import("parse.zig");
-const Inst = @import("inst.zig").Inst;
 const std = @import("std");
+const bf = @import("bf.zig");
 
-const simple_inter = @import("simple_interpreter.zig").interpret;
-const opti_inter = @import("opti_interpreter.zig").interpret;
+const codegen_x86 = @import("codegen_x86_64.zig");
+const jit = @import("jit.zig");
 
-/// Optimizing interpreter function. This version of the interpreter uses
-/// certain parsing optimizations, such as setting a memory location to zero,
-/// instead of simply running the loop
-fn interpret(ops: []Inst, alloc: std.mem.Allocator) !void {
-    var mem: [1024 * 30]u8 = undefined;
-    @memset(&mem, 0);
-
-    var cur_trace = std.ArrayList(u8).init(alloc);
-    defer cur_trace.deinit();
-
-    const in = std.io.getStdIn();
-    var reader = in.reader();
-
-    var op_count = std.AutoHashMap(u8, usize).init(alloc);
-    defer op_count.deinit();
-
-    var dp: usize = 0;
-    var ip: usize = 0;
-
-    while (true) {
-        const op = ops[ip];
-
-        switch (op) {
-            .inc_ptr => |*val| dp += val.*,
-            .dec_ptr => |*val| dp -= val.*,
-            .inc_data => |*val| mem[dp] +%= @intCast(val.*),
-            .dec_data => |*val| mem[dp] -%= @intCast(val.*),
-            .write => |*val| {
-                for (0..val.*) |_| {
-                    std.debug.print("{c}", .{mem[dp]});
-                }
-            },
-            .read => |*val| {
-                for (0..val.*) |_| {
-                    mem[dp] = try reader.readByte();
-                }
-            },
-            .jmp_if_zero => |*jmp| {
-                if (mem[dp] == 0) {
-                    ip = jmp.*;
-                }
-            },
-            .jmp_if_not_zero => |*jmp| {
-                if (mem[dp] != 0) {
-                    ip = jmp.*;
-                }
-            },
-            .loop_set_zero => mem[dp] = 0,
-            .move_ptr => |*val| {
-                while (mem[dp] != 0) {
-                    dp = @intCast(@as(isize, @intCast(dp)) + val.*);
-                }
-            },
-            .move_data => |*val| {
-                if (mem[dp] != 0) {
-                    const dest: usize = @intCast(@as(isize, @intCast(dp)) + val.*);
-                    mem[dest] = mem[dp];
-                    mem[dp] = 0;
-                }
-            },
-        }
-
-        // Counter instructions
-        const entry = try op_count.getOrPutValue(utils.opToChar(op), 0);
-        entry.value_ptr.* += 1;
-
-        ip += 1;
-
-        if (ip == ops.len) {
-            break;
-        }
-    }
-
-    var it1 = op_count.iterator();
-    std.debug.print("\n\nTrace summary: \n", .{});
-    while (it1.next()) |e| {
-        std.debug.print("{c} => {}\n", .{ e.key_ptr.*, e.value_ptr.* });
-    }
-    std.debug.print("\n", .{});
-}
+const Interpreter = @import("interpreter.zig").Interpreter;
 
 fn readFile(allocator: std.mem.Allocator, filename: []const u8) ![]u8 {
     const file = try std.fs.cwd().openFile(
@@ -111,21 +31,27 @@ pub fn main() !void {
     const program = try readFile(alloc, args[1]);
     defer alloc.free(program);
 
-    const code = try parse.tokenize(program, alloc);
-    defer alloc.free(code);
+    var ops = try bf.parse(program, alloc);
+    defer ops.deinit();
 
-    const ops = try parse.parse(code, alloc);
-    defer alloc.free(ops);
+    try bf.optimize(&ops);
+    try bf.fillJmpLocations(ops.items, alloc);
 
-    try interpret(ops, alloc);
+    // var interpreter = Interpreter.init(&bf.global_tape);
+    // try interpreter.run(ops.items, false);
 
-    // try interpret01(code);
+    var builder = jit.Builder.init(alloc);
+    defer builder.deinit();
 
-    // var jmptable = std.AutoHashMap(usize, usize).init(alloc);
-    // defer jmptable.deinit();
-    // try init_jumptable(code, &jmptable);
-    //
-    // try interpret02(code, jmptable);
+    try codegen_x86.generate(ops.items, &bf.global_tape, &builder, alloc);
+
+    // Dump to binary, insepct with: `objdump -D -b binary -mi386:x86-64 file`
+    var code_file = try std.fs.cwd().createFile("code", .{});
+    try code_file.writeAll(builder.code.items);
+
+    const jit_code = try builder.build();
+    defer jit_code.deinit();
+    jit_code.run();
 
     std.debug.print("\n", .{});
 }
