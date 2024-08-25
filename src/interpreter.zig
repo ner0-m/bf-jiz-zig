@@ -43,6 +43,8 @@ pub const Interpreter = struct {
             .sub => |c| c,
             .move_left => |c| c,
             .move_right => |c| c,
+            .read => |c| c,
+            .write => |c| c,
             else => 1,
         };
 
@@ -63,16 +65,18 @@ pub const Interpreter = struct {
                     self.pc = idx;
                 }
             },
-            .write => |amount| {
-                try std.io.getStdOut().writeAll(self.tape[self.dp .. self.dp + amount]);
+            .write => |n| {
+                try std.io.getStdOut().writeAll(self.tape[self.dp .. self.dp + n]);
             },
-            .read => {
-                var buf: [1]u8 = undefined;
+            .read => |n| {
+                var buf: [1024]u8 = undefined;
                 const read_count = try std.io.getStdIn().read(&buf);
+
+                // TODO: Assume n < 1024
                 if (read_count == 0) {
-                    self.tape[self.dp] = 0;
+                    @memset(self.tape[self.dp .. self.dp + n], 0);
                 } else {
-                    self.tape[self.dp] = buf[0];
+                    @memcpy(self.tape[self.dp .. self.dp + n], buf[0..n]);
                 }
             },
         }
